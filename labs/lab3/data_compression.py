@@ -14,9 +14,9 @@ import random
 from matplotlib import pyplot as plt
 
 
-def read_file(filename):
+def read_file(filename, max=-1):
     with open(filename, "r") as f:
-        return f.read()
+        return f.readlines(max)
 
 def bytes_to_bits(data):
     """Convert bytes into bits, most-significant bit first."""
@@ -26,15 +26,22 @@ def bytes_to_bits(data):
         for shift in range(7, -1, -1)
     ]
 
-def ser(original_symbols, recieved_symbols):
-    errors = 0
-    for [a,b] in zip(original_symbols, recieved_symbols):
-        if a is not b:
-            errors += 1
-    return errors/len(original_symbols)
-
 def ber(original_bits, recieved_bits):
-    return ser(original_bits, recieved_bits)
+    errors = 0
+    for [a,b] in zip(original_bits, recieved_bits):
+        if a != b:
+            errors += 1
+    return errors/len(original_bits)
+
+def ser(original_symbols, received_symbols):
+    errors = 0
+    max_len = max(len(original_symbols), len(received_symbols))
+    for i in range(max_len):
+        orig_char = original_symbols[i] if i < len(original_symbols) else None
+        recv_char = received_symbols[i] if i < len(received_symbols) else None
+        if orig_char != recv_char:
+            errors += 1
+    return errors / max_len if max_len > 0 else 0
 
 def bits_to_bytes(bits):
     """Pack bits into bytes, padding the final byte with zeros if needed."""
@@ -62,40 +69,59 @@ def transmit(bits, snr_db, skip_print = False):
     if not skip_print: print(f"SNR: {snr_db:.1f} dB")
     return (y > 0).astype(np.uint8)
 
-def monte_carlo(snrs = range(-2, 11, 2), trials = 100):
+def monte_carlo(lines, codec: HuffmanCodec, snrs=range(-2, 11, 2), trials=100):
     snrs = list(snrs)
 
-    coded_ber, uncoded_ber = [], []
-    coded_ser, uncoded_ser = [], []
+    coded_ber = []
+    uncoded_ber = []
+    coded_ser = []
+    uncoded_ser = []
 
     for snr in snrs:
-        cb = ub = cs = us = 0
-        total_info = total_coded = 0
+        coded_bit_errors = 0
+        uncoded_bit_errors = 0
+        coded_symbol_errors = 0
+        uncoded_symbol_errors = 0
+        total_info_bits = 0
+        total_symbols = 0
 
-        print(f"Testing")
+        for line in lines:
+            huffman_bytes = codec.encode(line)
+            info_bits = np.asarray(bytes_to_bits(huffman_bytes), dtype=np.uint8)
+            coded_bits, padding = hamming_encode(info_bits)
+            coded_bits = np.asarray(coded_bits, dtype=np.uint8)
 
-        for i in range(trials):
-            if i % 100 == 0:
-                print(f"Calculating... {i}/{trials}")
+            for _ in range(trials):
+                # Hamming-coded transmission
+                coded_rx = transmit(coded_bits, snr, skip_print=True)
+                decoded_bits = hamming_decode(coded_rx, data_padding=padding)
+                decoded_bits = np.asarray(decoded_bits[:len(info_bits)], dtype=np.uint8)
 
-            # Coded transmission
-            coded_rx = transmit(encoded_bits, snr, True)
-            decoded = hamming_decode(coded_rx, data_padding=padding)
+                coded_bit_errors += np.count_nonzero(decoded_bits != info_bits)
 
-            cb += np.count_nonzero(np.array(decoded) != unencoded_bits)
-            cs += np.count_nonzero(coded_rx != encoded_bits)
-            total_info += len(unencoded_bits)
-            total_coded += len(encoded_bits)
+                try:
+                    decoded_text = codec.decode(bits_to_bytes(decoded_bits))
+                    coded_symbol_errors += ser(line, decoded_text) * len(line)
+                except Exception:
+                    coded_symbol_errors += len(line)
 
-            # Uncoded transmission
-            uncoded_rx = transmit(unencoded_bits, snr, True)
-            ub += np.count_nonzero(uncoded_rx != unencoded_bits)
-            us += np.count_nonzero(uncoded_rx != unencoded_bits)
+                # Uncoded transmission
+                uncoded_rx = transmit(info_bits, snr, skip_print=True)
+                uncoded_bit_errors += np.count_nonzero(uncoded_rx != info_bits)
 
-        coded_ber.append(cb / total_info)
-        uncoded_ber.append(ub / total_info)
-        coded_ser.append(cs / total_coded)
-        uncoded_ser.append(us / total_info)
+                try:
+                    uncoded_text = codec.decode(bits_to_bytes(uncoded_rx))
+                    uncoded_symbol_errors += ser(line, uncoded_text) * len(line)
+                except Exception:
+                    uncoded_symbol_errors += len(line)
+
+                total_info_bits += len(info_bits)
+                total_symbols += len(line)
+
+        coded_ber.append(coded_bit_errors / total_info_bits if total_info_bits else 0)
+        uncoded_ber.append(uncoded_bit_errors / total_info_bits if total_info_bits else 0)
+        coded_ser.append(coded_symbol_errors / total_symbols if total_symbols else 0)
+        uncoded_ser.append(uncoded_symbol_errors / total_symbols if total_symbols else 0)
 
     plt.figure()
     plt.title("BER")
@@ -118,14 +144,17 @@ def monte_carlo(snrs = range(-2, 11, 2), trials = 100):
     plt.show()
 
 
+
 if __name__ == "__main__":
     training_text = None
-    sample_text = None
+    sample_lines = None
+    sample_text = ""
     if len(sys.argv)>2:
         training_file_name = sys.argv[1]
         sample_file_name = sys.argv[2]
-        training_text = read_file(training_file_name)
-        sample_text = read_file(sample_file_name)[:200]
+        training_text = "".join(read_file(training_file_name))
+        sample_lines = read_file(sample_file_name, 200)
+        sample_text += sample_lines[0]
 
     # Huffman
     codec = HuffmanCodec.from_data(training_text)
@@ -182,4 +211,4 @@ if __name__ == "__main__":
     print(f"SAMPLE:\n{sample_text[:50]}")
     print(f"DECODED:\n{decoded_text[:50]}")
 
-    monte_carlo()
+    monte_carlo(sample_lines, codec)
