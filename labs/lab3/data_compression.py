@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 
 
 def read_file(filename, max=-1):
-    with open(filename, "r") as f:
+    with open(filename, "r", encoding="utf-8") as f:
         return f.readlines(max)
 
 def bytes_to_bits(data):
